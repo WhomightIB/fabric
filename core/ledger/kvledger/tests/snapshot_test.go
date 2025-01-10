@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/ledgermgmt"
 	"github.com/hyperledger/fabric/core/ledger/util"
@@ -156,7 +156,7 @@ func TestSnapshotGenerationAndBootstrap(t *testing.T) {
 	})
 	testLedger.discardSimulation()
 
-	hashMismatches, err := testLedger.lgr.CommitPvtDataOfOldBlocks(
+	_, err = testLedger.lgr.CommitPvtDataOfOldBlocks(
 		[]*ledger.ReconciledPvtdata{
 			{
 				BlockNum: 2,
@@ -179,23 +179,6 @@ func TestSnapshotGenerationAndBootstrap(t *testing.T) {
 		}, nil,
 	)
 	require.NoError(t, err)
-	require.Equal(t,
-		[]*ledger.PvtdataHashMismatch{
-			{
-				BlockNum:   2,
-				TxNum:      0,
-				Namespace:  "myChaincode",
-				Collection: "collection-1",
-			},
-			{
-				BlockNum:   3,
-				TxNum:      0,
-				Namespace:  "myChaincode",
-				Collection: "collection-2",
-			},
-		},
-		hashMismatches,
-	)
 	testLedger.verifyMissingPvtDataSameAs(10, expectedMissingPvtDataAfterUpgrade)
 
 	// try committing legitimate pvtdata via reconciler

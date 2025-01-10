@@ -12,10 +12,9 @@ import (
 	"time"
 
 	"github.com/bits-and-blooms/bitset"
-	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
-	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric-lib-go/common/flogging"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
 	"github.com/hyperledger/fabric/common/ledger/util/leveldbhelper"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/confighistory"
@@ -24,6 +23,8 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/pvtdatapolicy"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 var logger = flogging.MustGetLogger("pvtdatastorage")
@@ -47,12 +48,13 @@ type PrivateDataConfig struct {
 
 // Store manages the permanent storage of private write sets for a ledger
 type Store struct {
-	db              *leveldbhelper.DBHandle
-	ledgerid        string
-	btlPolicy       pvtdatapolicy.BTLPolicy
-	batchesInterval int
-	maxBatchSize    int
-	purgeInterval   uint64
+	db                    *leveldbhelper.DBHandle
+	ledgerid              string
+	btlPolicy             pvtdatapolicy.BTLPolicy
+	batchesInterval       int
+	maxBatchSize          int
+	purgeInterval         uint64
+	purgedKeyAuditLogging bool
 
 	isEmpty            bool
 	lastCommittedBlock uint64
@@ -172,8 +174,8 @@ type storeEntries struct {
 // and is stored as the value of lastUpdatedOldBlocksKey (defined in kv_encoding.go)
 type lastUpdatedOldBlocksList []uint64
 
-//////// Provider functions  /////////////
-//////////////////////////////////////////
+// ////// Provider functions  /////////////
+// ////////////////////////////////////////
 
 // NewProvider instantiates a StoreProvider
 func NewProvider(conf *PrivateDataConfig) (*Provider, error) {
@@ -227,6 +229,7 @@ func (p *Provider) OpenStore(ledgerid string) (*Store, error) {
 		batchesInterval:                     p.pvtData.BatchesInterval,
 		maxBatchSize:                        p.pvtData.MaxBatchSize,
 		purgeInterval:                       uint64(p.pvtData.PurgeInterval),
+		purgedKeyAuditLogging:               p.pvtData.PurgedKeyAuditLogging,
 		deprioritizedDataReconcilerInterval: p.pvtData.DeprioritizedDataReconcilerInterval,
 		accessDeprioMissingDataAfter:        time.Now().Add(p.pvtData.DeprioritizedDataReconcilerInterval),
 		collElgProcSync: &collElgProcSync{
@@ -253,8 +256,8 @@ func (p *Provider) Drop(ledgerid string) error {
 	return p.dbProvider.Drop(ledgerid)
 }
 
-//////// store functions  ////////////////
-//////////////////////////////////////////
+// ////// store functions  ////////////////
+// ////////////////////////////////////////
 
 func (s *Store) initState() error {
 	var err error
@@ -395,7 +398,7 @@ func (s *Store) Commit(blockNum uint64, pvtData []*ledger.TxPvtData, missingPvtD
 // GetLastUpdatedOldBlocksPvtData returns the pvtdata of blocks listed in `lastUpdatedOldBlocksList`
 // TODO FAB-16293 -- GetLastUpdatedOldBlocksPvtData() can be removed either in v2.0 or in v2.1.
 // If we decide to rebuild stateDB in v2.0, by default, the rebuild logic would take
-// care of synching stateDB with pvtdataStore without calling GetLastUpdatedOldBlocksPvtData().
+// care of syncing stateDB with pvtdataStore without calling GetLastUpdatedOldBlocksPvtData().
 // Hence, it can be safely removed. Suppose if we decide not to rebuild stateDB in v2.0,
 // we can remove this function in v2.1.
 func (s *Store) GetLastUpdatedOldBlocksPvtData() (map[uint64][]*ledger.TxPvtData, error) {
@@ -418,8 +421,11 @@ func (s *Store) GetLastUpdatedOldBlocksPvtData() (map[uint64][]*ledger.TxPvtData
 }
 
 func (s *Store) getLastUpdatedOldBlocksList() ([]uint64, error) {
-	var v []byte
-	var err error
+	var (
+		v        []byte
+		err      error
+		position int
+	)
 	if v, err = s.db.Get(lastUpdatedOldBlocksKey); err != nil {
 		return nil, err
 	}
@@ -428,16 +434,18 @@ func (s *Store) getLastUpdatedOldBlocksList() ([]uint64, error) {
 	}
 
 	var updatedBlksList []uint64
-	buf := proto.NewBuffer(v)
-	numBlks, err := buf.DecodeVarint()
-	if err != nil {
-		return nil, err
+	numBlks, n := protowire.ConsumeVarint(v[position:])
+	if n < 0 {
+		return nil, protowire.ParseError(n)
 	}
+	position += n
+
 	for i := 0; i < int(numBlks); i++ {
-		blkNum, err := buf.DecodeVarint()
-		if err != nil {
-			return nil, err
+		blkNum, n := protowire.ConsumeVarint(v[position:])
+		if n < 0 {
+			return nil, protowire.ParseError(n)
 		}
+		position += n
 		updatedBlksList = append(updatedBlksList, blkNum)
 	}
 	return updatedBlksList, nil
@@ -564,6 +572,45 @@ func (s *Store) keyPotentiallyPurged(k *dataKey) (bool, error) {
 	return keyHt.Compare(purgeKeyCollMarkerHt) <= 0, nil
 }
 
+func (s *Store) RemoveAppInitiatedPurgesUsingReconMarker(
+	kvHashes map[string][]byte, ns, coll string, blkNum, txNum uint64,
+) (map[string][]byte, error) {
+	trimmedKVHashes := map[string][]byte{}
+	keyHt := &version.Height{
+		BlockNum: blkNum,
+		TxNum:    txNum,
+	}
+
+	for k, v := range kvHashes {
+		potentialPurgeMarker := encodePurgeMarkerForReconKey(
+			&purgeMarkerKey{
+				ns:         ns,
+				coll:       coll,
+				pvtkeyHash: []byte(k),
+			},
+		)
+
+		encPurgeMarkerVal, err := s.db.Get(potentialPurgeMarker)
+		if err != nil {
+			return nil, err
+		}
+
+		if encPurgeMarkerVal == nil {
+			trimmedKVHashes[k] = v
+			continue
+		}
+
+		purgeMarkerHt, err := decodePurgeMarkerVal(encPurgeMarkerVal)
+		if err != nil {
+			return nil, err
+		}
+		if keyHt.Compare(purgeMarkerHt) > 0 {
+			trimmedKVHashes[k] = v
+		}
+	}
+	return trimmedKVHashes, nil
+}
+
 func (s *Store) removePurgedDataFromCollPvtRWset(k *dataKey, v *rwset.CollectionPvtReadWriteSet) error {
 	purgePossible, err := s.keyPotentiallyPurged(k)
 	if !purgePossible || err != nil {
@@ -618,7 +665,7 @@ func (s *Store) removePurgedDataFromCollPvtRWset(k *dataKey, v *rwset.Collection
 
 // GetMissingPvtDataInfoForMostRecentBlocks returns the missing private data information for the
 // most recent `maxBlock` blocks which miss at least a private data of a eligible collection.
-func (s *Store) GetMissingPvtDataInfoForMostRecentBlocks(maxBlock int) (ledger.MissingPvtDataInfo, error) {
+func (s *Store) GetMissingPvtDataInfoForMostRecentBlocks(startingBlockNum uint64, maxBlock int) (ledger.MissingPvtDataInfo, error) {
 	// we assume that this function would be called by the gossip only after processing the
 	// last retrieved missing pvtdata info and committing the same.
 	if maxBlock < 1 {
@@ -628,25 +675,20 @@ func (s *Store) GetMissingPvtDataInfoForMostRecentBlocks(maxBlock int) (ledger.M
 	if time.Now().After(s.accessDeprioMissingDataAfter) {
 		s.accessDeprioMissingDataAfter = time.Now().Add(s.deprioritizedDataReconcilerInterval)
 		logger.Debug("fetching missing pvtdata entries from the deprioritized list")
-		return s.getMissingData(elgDeprioritizedMissingDataGroup, maxBlock)
+		return s.getMissingData(elgDeprioritizedMissingDataGroup, startingBlockNum, maxBlock)
 	}
 
 	logger.Debug("fetching missing pvtdata entries from the prioritized list")
-	return s.getMissingData(elgPrioritizedMissingDataGroup, maxBlock)
+	return s.getMissingData(elgPrioritizedMissingDataGroup, startingBlockNum, maxBlock)
 }
 
-func (s *Store) getMissingData(group []byte, maxBlock int) (ledger.MissingPvtDataInfo, error) {
+func (s *Store) getMissingData(group []byte, startingBlockNum uint64, maxBlock int) (ledger.MissingPvtDataInfo, error) {
 	missingPvtDataInfo := make(ledger.MissingPvtDataInfo)
 	numberOfBlockProcessed := 0
 	lastProcessedBlock := uint64(0)
 	isMaxBlockLimitReached := false
 
-	// as we are not acquiring a read lock, new blocks can get committed while we
-	// construct the MissingPvtDataInfo. As a result, lastCommittedBlock can get
-	// changed. To ensure consistency, we atomically load the lastCommittedBlock value
-	lastCommittedBlock := atomic.LoadUint64(&s.lastCommittedBlock)
-
-	startKey, endKey := createRangeScanKeysForElgMissingData(lastCommittedBlock, group)
+	startKey, endKey := createRangeScanKeysForElgMissingData(startingBlockNum, group)
 	dbItr, err := s.db.GetIterator(startKey, endKey)
 	if err != nil {
 		return nil, err
@@ -671,7 +713,7 @@ func (s *Store) getMissingData(group []byte, maxBlock int) (ledger.MissingPvtDat
 		// data (less possibility of expiring now), such scenario would be rare. In the
 		// best case, we can load the latest lastCommittedBlock value here atomically to
 		// make this scenario very rare.
-		lastCommittedBlock = atomic.LoadUint64(&s.lastCommittedBlock)
+		lastCommittedBlock := atomic.LoadUint64(&s.lastCommittedBlock)
 		expired, err := isExpired(missingDataKey.nsCollBlk, s.btlPolicy, lastCommittedBlock)
 		if err != nil {
 			return nil, err
@@ -835,7 +877,7 @@ func (s *Store) deleteDataMarkedForPurge() error {
 	maxBatchSize := 4 * 1024 * 1024 // 4Mb
 	purgeMarkerCounter := 0
 	hashedIndexCounter := 0
-	p := newPurgeUpdatesProcessor(s.db, maxBatchSize)
+	p := newPurgeUpdatesProcessor(s.ledgerid, s.db, s.purgedKeyAuditLogging, maxBatchSize)
 	pStart, pEnd := rangeScanKeysForPurgeMarkers()
 
 	// get the purge markers that need to be processed at this block height
@@ -877,12 +919,18 @@ func (s *Store) deleteDataMarkedForPurge() error {
 		p.addProcessedPurgeMarkerForDeletion(encPurgeMarkerKey)
 		purgeMarkerCounter++
 	}
-	if purgeMarkerCounter > 0 {
-		logger.Infow("Processed private data purges from private data storage", "channel", s.ledgerid, "numKeysPurged", purgeMarkerCounter, "numPrivateDataStoreRecordsPurged", hashedIndexCounter)
-	}
 
 	// commit the private data purges and index deletions to the private data store
-	return p.commitPendingChanges()
+	err = p.commitPendingChanges()
+	if err != nil {
+		return err
+	}
+
+	if purgeMarkerCounter > 0 {
+		logger.Infow("Purged private data from private data storage", "channel", s.ledgerid, "numKeysPurged", purgeMarkerCounter, "numPrivateDataStoreRecordsPurged", hashedIndexCounter)
+	}
+
+	return nil
 }
 
 func (s *Store) retrieveExpiryEntries(minBlkNum, maxBlkNum uint64) ([]*expiryEntry, error) {
@@ -1125,23 +1173,27 @@ func (c *collElgProcSync) waitForDone() {
 }
 
 type purgeUpdatesProcessor struct {
+	ledgerid     string
 	db           *leveldbhelper.DBHandle
+	batch        *leveldbhelper.UpdateBatch
 	maxBatchSize int
 
 	pvtWrites map[string]*rwsetutil.CollPvtRwSet
-	batch     *leveldbhelper.UpdateBatch
 
-	currentSize int
+	currentSize           int
+	purgedKeyAuditLogging bool
 }
 
 // newPurgeUpdatesProcessor is used for processing the purge markers - i.e., delete the private data versions that are marked for purge from
 // the pvtdata store.
-func newPurgeUpdatesProcessor(db *leveldbhelper.DBHandle, maxBatchSize int) *purgeUpdatesProcessor {
+func newPurgeUpdatesProcessor(ledgerid string, db *leveldbhelper.DBHandle, purgedKeyAuditLogging bool, maxBatchSize int) *purgeUpdatesProcessor {
 	return &purgeUpdatesProcessor{
-		db:           db,
-		maxBatchSize: maxBatchSize,
-		pvtWrites:    map[string]*rwsetutil.CollPvtRwSet{},
-		batch:        db.NewUpdateBatch(),
+		ledgerid:              ledgerid,
+		db:                    db,
+		purgedKeyAuditLogging: purgedKeyAuditLogging,
+		maxBatchSize:          maxBatchSize,
+		pvtWrites:             map[string]*rwsetutil.CollPvtRwSet{},
+		batch:                 db.NewUpdateBatch(),
 	}
 }
 
@@ -1184,6 +1236,16 @@ func (p *purgeUpdatesProcessor) process(hashedIndexKey, hashedIndexVal []byte) e
 			break
 		}
 	}
+
+	// If configured, log the purged key for audit purpose
+	if p.purgedKeyAuditLogging {
+		decodedDataKey, err := decodeDatakey(dataKey)
+		if err != nil {
+			return err
+		}
+		logger.Infow("Purging private data from private data storage", "channel", p.ledgerid, "chaincode", decodedDataKey.nsCollBlk.ns, "collection", decodedDataKey.nsCollBlk.coll, "key", string(hashedIndexVal), "blockNum", decodedDataKey.nsCollBlk.blkNum, "tranNum", decodedDataKey.txNum)
+	}
+
 	p.batch.Delete(hashedIndexKey)
 	if p.currentSize+p.batch.Size() > p.maxBatchSize {
 		if err := p.commitPendingChanges(); err != nil {

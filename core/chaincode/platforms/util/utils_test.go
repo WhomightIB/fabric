@@ -11,7 +11,7 @@ import (
 	"bytes"
 	"encoding/base32"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
 	"runtime"
 	"strings"
@@ -60,7 +60,7 @@ func TestDockerBuild(t *testing.T) {
 	err = client.BuildImage(docker.BuildImageOptions{
 		Name:         imageName,
 		InputStream:  is,
-		OutputStream: ioutil.Discard,
+		OutputStream: io.Discard,
 	})
 	require.NoError(t, err, "failed to build base image")
 	defer client.RemoveImageExtended(imageName, docker.RemoveImageOptions{Force: true})
@@ -74,7 +74,7 @@ func TestDockerBuild(t *testing.T) {
 			Image:        imageName,
 			Cmd:          "/bin/true",
 			InputStream:  codepackage,
-			OutputStream: ioutil.Discard,
+			OutputStream: io.Discard,
 		},
 		client,
 	)
@@ -119,8 +119,23 @@ func TestTwoDigitVersion(t *testing.T) {
 	actual := twoDigitVersion(version)
 	require.Equal(t, expected, actual, `Error parsing two digit version. Expected "%s", got "%s"`, expected, actual)
 
+	version = "2.0.0-beta123"
+	expected = "2.0"
+	actual = twoDigitVersion(version)
+	require.Equal(t, expected, actual, `Error parsing two digit version. Expected "%s", got "%s"`, expected, actual)
+
 	version = "latest"
 	expected = "latest"
+	actual = twoDigitVersion(version)
+	require.Equal(t, expected, actual, `Error parsing two digit version. Expected "%s", got "%s"`, expected, actual)
+
+	version = "v1.2.3"
+	expected = "1.2"
+	actual = twoDigitVersion(version)
+	require.Equal(t, expected, actual, `Error parsing two digit version. Expected "%s", got "%s"`, expected, actual)
+
+	version = "v1.2.3-beta1"
+	expected = "1.2"
 	actual = twoDigitVersion(version)
 	require.Equal(t, expected, actual, `Error parsing two digit version. Expected "%s", got "%s"`, expected, actual)
 }

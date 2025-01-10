@@ -7,10 +7,11 @@ SPDX-License-Identifier: Apache-2.0
 package pvtdatastorage
 
 import (
+	"math"
 	"path"
 	"testing"
 
-	"github.com/hyperledger/fabric-protos-go/peer"
+	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/confighistory/confighistorytest"
 	"github.com/hyperledger/fabric/core/ledger/internal/version"
@@ -195,7 +196,7 @@ func TestPvtdataStoreCreatedFromSnapshot(t *testing.T) {
 			m,
 		)
 
-		missingDataInfo, err := store.GetMissingPvtDataInfoForMostRecentBlocks(4)
+		missingDataInfo, err := store.GetMissingPvtDataInfoForMostRecentBlocks(math.MaxUint64, 4)
 		require.NoError(t, err)
 		require.Equal(
 			t,
@@ -233,7 +234,7 @@ func TestPvtdataStoreCreatedFromSnapshot(t *testing.T) {
 		)
 		require.NoError(t, err)
 
-		missingDataInfo, err = store.GetMissingPvtDataInfoForMostRecentBlocks(4)
+		missingDataInfo, err = store.GetMissingPvtDataInfoForMostRecentBlocks(math.MaxUint64, 4)
 		require.NoError(t, err)
 		require.Len(t, missingDataInfo, 0)
 

@@ -14,14 +14,15 @@ import (
 	"time"
 
 	"code.cloudfoundry.org/clock"
-	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric-protos-go/orderer"
-	"github.com/hyperledger/fabric-protos-go/orderer/etcdraft"
-	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric-lib-go/common/flogging"
+	"github.com/hyperledger/fabric-protos-go-apiv2/orderer"
+	"github.com/hyperledger/fabric-protos-go-apiv2/orderer/etcdraft"
 	"github.com/hyperledger/fabric/protoutil"
 	"github.com/pkg/errors"
 	"go.etcd.io/etcd/raft/v3"
 	"go.etcd.io/etcd/raft/v3/raftpb"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/protoadapt"
 )
 
 var (
@@ -74,7 +75,10 @@ func (n *node) start(fresh, join bool) {
 			// determine the node to start campaign by selecting the node with ID equals to:
 			//                hash(channelID) % cluster_size + 1
 			sha := sha256.Sum256([]byte(n.chainID))
-			number, _ := proto.DecodeVarint(sha[24:])
+			number, s := protowire.ConsumeVarint(sha[24:])
+			if s < 0 {
+				number = 0
+			}
 			if n.config.ID == number%uint64(len(raftPeers))+1 {
 				campaign = true
 			}
@@ -142,7 +146,7 @@ func (n *node) run(campaign bool) {
 				n.logger.Panicf("Failed to persist etcd/raft data: %s", err)
 			}
 			duration := n.clock.Since(startStoring).Seconds()
-			n.metrics.DataPersistDuration.Observe(float64(duration))
+			n.metrics.DataPersistDuration.Observe(duration)
 			if duration > halfElectionTimeout {
 				n.logger.Warningf("WAL sync took %v seconds and the network is configured to start elections after %v seconds. Your disk is too slow and may cause loss of quorum and trigger leadership election.", duration, electionTimeout)
 			}
@@ -151,17 +155,9 @@ func (n *node) run(campaign bool) {
 				n.chain.snapC <- &rd.Snapshot
 			}
 
-			lcs := n.leaderChangeSubscription.Load()
-
-			if lcs != nil && rd.SoftState != nil {
-				if l := atomic.LoadUint64(&rd.SoftState.Lead); l != raft.None {
-					subscription := lcs.(func(uint64))
-					subscription(l)
-				}
-			}
-
 			// skip empty apply
 			if len(rd.CommittedEntries) != 0 || rd.SoftState != nil {
+				n.maybeSyncWAL(rd.CommittedEntries)
 				n.chain.applyC <- apply{rd.CommittedEntries, rd.SoftState}
 			}
 
@@ -210,7 +206,7 @@ func (n *node) send(msgs []raftpb.Message) {
 			}
 		}
 
-		msgBytes := protoutil.MarshalOrPanic(&msg)
+		msgBytes := protoutil.MarshalOrPanic(protoadapt.MessageV2Of(&msg))
 		err := n.rpc.SendConsensus(msg.To, &orderer.ConsensusRequest{Channel: n.chainID, Payload: msgBytes})
 		if err != nil {
 			n.ReportUnreachable(msg.To)
@@ -225,6 +221,24 @@ func (n *node) send(msgs []raftpb.Message) {
 		if msg.Type == raftpb.MsgSnap {
 			n.ReportSnapshot(msg.To, status)
 		}
+	}
+}
+
+func (n *node) maybeSyncWAL(entries []raftpb.Entry) {
+	allNormal := true
+	for _, entry := range entries {
+		if entry.Type == raftpb.EntryNormal {
+			continue
+		}
+		allNormal = false
+	}
+
+	if allNormal {
+		return
+	}
+
+	if err := n.storage.Sync(); err != nil {
+		n.logger.Errorf("Failed to sync raft log, error: %s", err)
 	}
 }
 

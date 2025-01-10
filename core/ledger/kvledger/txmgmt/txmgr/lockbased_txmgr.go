@@ -10,11 +10,10 @@ import (
 	"bytes"
 	"sync"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric-protos-go/common"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
-	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric-lib-go/common/flogging"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
 	"github.com/hyperledger/fabric/common/ledger/snapshot"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/internal/version"
@@ -27,6 +26,7 @@ import (
 	"github.com/hyperledger/fabric/core/ledger/pvtdatapolicy"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/pkg/errors"
+	"google.golang.org/protobuf/proto"
 )
 
 var logger = flogging.MustGetLogger("lockbasedtxmgr")
@@ -69,7 +69,13 @@ func (c *currentUpdates) maxTxNumber() uint64 {
 
 func (c *currentUpdates) purgeAppInitiatedPvtKeys(keys map[privacyenabledstate.PvtdataCompositeKey]*version.Height) {
 	for ck, ver := range keys {
-		c.batch.PvtUpdates.Delete(ck.Namespace, ck.CollectionName, ck.Key, ver)
+		pvtValVer := c.batch.PvtUpdates.Get(ck.Namespace, ck.CollectionName, ck.Key)
+		if pvtValVer == nil || pvtValVer.Version.Compare(ver) < 0 {
+			// delete the purged pvtkey from the statedb if the pvtkey is not present in the private updates
+			// (this could be because, either this peer is ineligible now, or the pvtWS is not supplied with the block)
+			// Don't delete if the pvtkey of higher version is present in the private updates
+			c.batch.PvtUpdates.Delete(ck.Namespace, ck.CollectionName, ck.Key, ver)
+		}
 	}
 }
 

@@ -9,7 +9,6 @@ package e2e
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/hyperledger/fabric/common/crypto/tlsgen"
 	"github.com/hyperledger/fabric/core/container/externalbuilder"
+	"github.com/hyperledger/fabric/integration/channelparticipation"
 	"github.com/hyperledger/fabric/integration/nwo"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -32,13 +32,14 @@ var _ = Describe("ChaincodeAsExternalServer", func() {
 		chaincode                   nwo.Chaincode
 		chaincodeServerAddress      string
 		assetDir                    string
+		ordererRunner               *ginkgomon.Runner
 		ordererProcess, peerProcess ifrit.Process
 		ccserver                    ifrit.Process
 	)
 
 	BeforeEach(func() {
 		var err error
-		testDir, err = ioutil.TempDir("", "external-chaincode-server")
+		testDir, err = os.MkdirTemp("", "external-chaincode-server")
 		Expect(err).NotTo(HaveOccurred())
 
 		network = nwo.New(nwo.BasicEtcdRaft(), testDir, nil, StartPort(), components)
@@ -50,31 +51,25 @@ var _ = Describe("ChaincodeAsExternalServer", func() {
 		connData, serverKeyPair := generateChaincodeConfig(chaincodeServerAddress)
 
 		// Create directory for configuration files
-		assetDir, err = ioutil.TempDir(testDir, "assets")
+		assetDir, err = os.MkdirTemp(testDir, "assets")
 		Expect(err).NotTo(HaveOccurred())
 
 		// Write the config files
 		connJSON, err := json.Marshal(connData)
 		Expect(err).NotTo(HaveOccurred())
-		err = ioutil.WriteFile(filepath.Join(assetDir, "connection.json"), connJSON, 0o644)
+		err = os.WriteFile(filepath.Join(assetDir, "connection.json"), connJSON, 0o644)
 		Expect(err).NotTo(HaveOccurred())
 
 		configJSON, err := json.Marshal(serverKeyPair)
 		Expect(err).NotTo(HaveOccurred())
-		err = ioutil.WriteFile(filepath.Join(assetDir, "config.json"), configJSON, 0o644)
+		err = os.WriteFile(filepath.Join(assetDir, "config.json"), configJSON, 0o644)
 		Expect(err).NotTo(HaveOccurred())
 
 		// Setup the network
-		ordererRunner := network.OrdererRunner(network.Orderer("orderer"))
-		ordererProcess = ifrit.Invoke(ordererRunner)
+		ordererRunner, ordererProcess, peerProcess = network.StartSingleOrdererNetwork("orderer")
 
-		peerRunner := network.PeerGroupRunner()
-		peerProcess = ifrit.Invoke(peerRunner)
+		channelparticipation.JoinOrdererJoinPeersAppChannel(network, "testchannel", network.Orderer("orderer"), ordererRunner)
 
-		Eventually(ordererProcess.Ready(), network.EventuallyTimeout).Should(BeClosed())
-		Eventually(peerProcess.Ready(), network.EventuallyTimeout).Should(BeClosed())
-
-		network.CreateAndJoinChannel(network.Orderer("orderer"), "testchannel")
 		nwo.EnableCapabilities(
 			network,
 			"testchannel",
