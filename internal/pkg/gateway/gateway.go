@@ -8,8 +8,10 @@ package gateway
 import (
 	"context"
 
-	peerproto "github.com/hyperledger/fabric-protos-go/peer"
-	"github.com/hyperledger/fabric/common/flogging"
+	"github.com/hyperledger/fabric-lib-go/common/flogging"
+	peerproto "github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	"github.com/hyperledger/fabric/common/channelconfig"
+	"github.com/hyperledger/fabric/common/deliverclient/orderers"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/scc"
 	gdiscovery "github.com/hyperledger/fabric/gossip/discovery"
@@ -24,12 +26,13 @@ var logger = flogging.MustGetLogger("gateway")
 
 // Server represents the GRPC server for the Gateway.
 type Server struct {
-	registry       *registry
-	commitFinder   CommitFinder
-	policy         ACLChecker
-	options        config.Options
-	logger         *flogging.FabricLogger
-	ledgerProvider ledger.Provider
+	registry         *registry
+	commitFinder     CommitFinder
+	policy           ACLChecker
+	options          config.Options
+	logger           *flogging.FabricLogger
+	ledgerProvider   ledger.Provider
+	getChannelConfig channelConfigGetter
 }
 
 type EndorserServerAdapter struct {
@@ -47,6 +50,8 @@ type CommitFinder interface {
 type ACLChecker interface {
 	CheckACL(policyName string, channelName string, data interface{}) error
 }
+
+type channelConfigGetter func(cid string) channelconfig.Resources
 
 // CreateServer creates an embedded instance of the Gateway.
 func CreateServer(
@@ -77,6 +82,8 @@ func CreateServer(
 		secureOptions,
 		options,
 		systemChaincodes,
+		peerInstance.OrdererEndpointOverrides,
+		peerInstance.GetChannelConfig,
 	)
 
 	peerInstance.AddConfigCallbacks(server.registry.configUpdate)
@@ -94,21 +101,33 @@ func newServer(localEndorser peerproto.EndorserClient,
 	secureOptions *comm.SecureOptions,
 	options config.Options,
 	systemChaincodes scc.BuiltinSCCs,
+	ordererEndpointOverrides map[string]*orderers.Endpoint,
+	getChannelConfig channelConfigGetter,
 ) *Server {
 	return &Server{
 		registry: &registry{
-			localEndorser:      &endorser{client: localEndorser, endpointConfig: &endpointConfig{pkiid: localInfo.PKIid, address: localInfo.Endpoint, mspid: localMSPID}},
-			discovery:          discovery,
-			logger:             logger,
-			endpointFactory:    &endpointFactory{timeout: options.DialTimeout, clientCert: secureOptions.Certificate, clientKey: secureOptions.Key},
+			localEndorser: &endorser{
+				client:         localEndorser,
+				endpointConfig: &endpointConfig{pkiid: localInfo.PKIid, address: localInfo.Endpoint, logAddress: localInfo.Endpoint, mspid: localMSPID},
+			},
+			discovery: discovery,
+			logger:    logger,
+			endpointFactory: &endpointFactory{
+				timeout:                  options.DialTimeout,
+				clientCert:               secureOptions.Certificate,
+				clientKey:                secureOptions.Key,
+				ordererEndpointOverrides: ordererEndpointOverrides,
+			},
 			remoteEndorsers:    map[string]*endorser{},
 			channelInitialized: map[string]bool{},
 			systemChaincodes:   systemChaincodes,
+			localProvider:      ledgerProvider,
 		},
-		commitFinder:   finder,
-		policy:         policy,
-		options:        options,
-		logger:         logger,
-		ledgerProvider: ledgerProvider,
+		commitFinder:     finder,
+		policy:           policy,
+		options:          options,
+		logger:           logger,
+		ledgerProvider:   ledgerProvider,
+		getChannelConfig: getChannelConfig,
 	}
 }

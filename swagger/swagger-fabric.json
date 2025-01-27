@@ -14,7 +14,7 @@
     "description": "Hyperledger Fabric is an enterprise-grade permissioned distributed ledger framework for developing\nsolutions and applications. Its modular and versatile design satisfies a broad range of industry use\ncases. It offers a unique approach to consensus that enables performance at scale while preserving privacy.",
     "title": "Fabric API",
     "license": {
-      "name": "Copyright IBM Corp. All Rights Reserved."
+      "name": "Apache-2.0"
     },
     "version": "2.3"
   },
@@ -154,11 +154,8 @@
           "400": {
             "description": "Cannot join channel."
           },
-          "403": {
-            "description": "The client is trying to join the system-channel that does not exist, but application channels exist."
-          },
           "405": {
-            "description": "The client is trying to join an app-channel, but the system channel exists.\nThe client is trying to join an app-channel that exists, but the system channel does not.\nThe client is trying to join the system-channel, and it exists.\n"
+            "description": "The client is trying to join an app-channel that exists."
           },
           "409": {
             "description": "The client is trying to join a channel that is currently being removed."
@@ -228,9 +225,6 @@
           },
           "404": {
             "description": "The channel does not exist."
-          },
-          "405": {
-            "description": "The system channel exists, removal is not allowed."
           },
           "409": {
             "description": "The channel is pending removal."
@@ -331,17 +325,6 @@
       },
       "x-go-name": "ChannelList",
       "x-go-package": "github.com/hyperledger/fabric/orderer/common/types"
-    },
-    "spec": {
-      "type": "object",
-      "properties": {
-        "spec": {
-          "type": "string",
-          "x-go-name": "Spec"
-        }
-      },
-      "x-go-name": "LogSpec",
-      "x-go-package": "github.com/hyperledger/fabric/common/flogging/httpadmin"
     }
   },
   "tags": [

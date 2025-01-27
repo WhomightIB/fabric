@@ -8,14 +8,14 @@ package sbe
 
 import (
 	"encoding/json"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 
 	docker "github.com/fsouza/go-dockerclient"
-	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
+	"github.com/hyperledger/fabric/integration/channelparticipation"
 	"github.com/hyperledger/fabric/integration/nwo"
 	"github.com/hyperledger/fabric/integration/nwo/commands"
 	. "github.com/onsi/ginkgo/v2"
@@ -23,43 +23,43 @@ import (
 	"github.com/onsi/gomega/gbytes"
 	"github.com/onsi/gomega/gexec"
 	"github.com/tedsuo/ifrit"
+	ginkgomon "github.com/tedsuo/ifrit/ginkgomon_v2"
 )
 
 var _ = Describe("SBE_E2E", func() {
 	var (
-		testDir   string
-		client    *docker.Client
-		network   *nwo.Network
-		chaincode nwo.Chaincode
-		process   ifrit.Process
-		tempDir   string
+		testDir                     string
+		client                      *docker.Client
+		network                     *nwo.Network
+		chaincode                   nwo.Chaincode
+		ordererRunner               *ginkgomon.Runner
+		ordererProcess, peerProcess ifrit.Process
+		tempDir                     string
 	)
 
 	BeforeEach(func() {
 		var err error
-		testDir, err = ioutil.TempDir("", "e2e_sbe")
+		testDir, err = os.MkdirTemp("", "e2e_sbe")
 		Expect(err).NotTo(HaveOccurred())
 
 		client, err = docker.NewClientFromEnv()
 		Expect(err).NotTo(HaveOccurred())
 
-		chaincode = nwo.Chaincode{
-			Name:              "mycc",
-			Version:           "0.0",
-			Path:              "github.com/hyperledger/fabric/integration/chaincode/keylevelep/cmd",
-			Ctor:              `{"Args":["init"]}`,
-			CollectionsConfig: "testdata/collection_config.json",
-		}
-
-		tempDir, err = ioutil.TempDir("", "sbe")
+		tempDir, err = os.MkdirTemp("", "sbe")
 		Expect(err).NotTo(HaveOccurred())
 	})
 
 	AfterEach(func() {
-		if process != nil {
-			process.Signal(syscall.SIGTERM)
-			Eventually(process.Wait(), network.EventuallyTimeout).Should(Receive())
+		if ordererProcess != nil {
+			ordererProcess.Signal(syscall.SIGTERM)
+			Eventually(ordererProcess.Wait(), network.EventuallyTimeout).Should(Receive())
 		}
+
+		if peerProcess != nil {
+			peerProcess.Signal(syscall.SIGTERM)
+			Eventually(peerProcess.Wait(), network.EventuallyTimeout).Should(Receive())
+		}
+
 		if network != nil {
 			network.Cleanup()
 		}
@@ -73,30 +73,7 @@ var _ = Describe("SBE_E2E", func() {
 			network.GenerateConfigTree()
 			network.Bootstrap()
 
-			networkRunner := network.NetworkGroupRunner()
-			process = ifrit.Invoke(networkRunner)
-			Eventually(process.Ready(), network.EventuallyTimeout).Should(BeClosed())
-		})
-
-		It("executes a basic etcdraft network with 2 orgs and SBE checks", func() {
-			By("getting the orderer by name")
-			orderer := network.Orderer("orderer")
-
-			By("setting up the channel")
-			network.CreateAndJoinChannel(orderer, "testchannel")
-
-			By("updating the anchor peers")
-			network.UpdateChannelAnchors(orderer, "testchannel")
-
-			By("deploying the chaincode")
-			nwo.DeployChaincodeLegacy(network, "testchannel", orderer, chaincode)
-
-			By("deploying a second instance of the chaincode")
-			chaincode.Name = "mycc2"
-			nwo.DeployChaincodeLegacy(network, "testchannel", orderer, chaincode)
-
-			RunSBE(network, orderer, "pub")
-			RunSBE(network, orderer, "priv")
+			ordererRunner, ordererProcess, peerProcess = network.StartSingleOrdererNetwork("orderer")
 		})
 
 		It("executes a basic etcdraft network with 2 orgs and SBE checks with _lifecycle", func() {
@@ -118,10 +95,7 @@ var _ = Describe("SBE_E2E", func() {
 			orderer := network.Orderer("orderer")
 
 			By("setting up the channel")
-			network.CreateAndJoinChannel(orderer, "testchannel")
-
-			By("updating the anchor peers")
-			network.UpdateChannelAnchors(orderer, "testchannel")
+			channelparticipation.JoinOrdererJoinPeersAppChannel(network, "testchannel", orderer, ordererRunner)
 			network.VerifyMembership(network.PeersWithChannel("testchannel"), "testchannel")
 
 			By("enabling 2.0 application capabilities")

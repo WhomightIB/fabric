@@ -14,12 +14,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/hyperledger/fabric-protos-go/peer"
-
-	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric-protos-go/ledger/queryresult"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset"
-	"github.com/hyperledger/fabric-protos-go/ledger/rwset/kvrwset"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/queryresult"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset"
+	"github.com/hyperledger/fabric-protos-go-apiv2/ledger/rwset/kvrwset"
+	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
 	"github.com/hyperledger/fabric/common/ledger/testutil"
 	"github.com/hyperledger/fabric/core/ledger"
 	"github.com/hyperledger/fabric/core/ledger/internal/version"
@@ -28,6 +26,7 @@ import (
 	btltestutil "github.com/hyperledger/fabric/core/ledger/pvtdatapolicy/testutil"
 	"github.com/hyperledger/fabric/core/ledger/util"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestTxSimulatorWithNoExistingData(t *testing.T) {
@@ -1732,4 +1731,18 @@ func testTxSimulatorWithPrivateDataStateBasedEndorsement(t *testing.T, env testE
 	metadata = ledger.WritesetMetadata{}
 	metadata.Add(ns, coll, "key1", sbe2)
 	require.Equal(t, metadata, simRes3.WritesetMetadata)
+
+	// simulate tx4 that purges existing private data
+	s4, _ := txMgr.NewTxSimulator("test_tx4")
+	require.NoError(t, s4.PurgePrivateData(ns, coll, "key1"))
+	s4.Done()
+
+	blkAndPvtdata4, simRes4 := prepareNextBlockForTestFromSimulator(t, bg, s4)
+	_, _, _, err = txMgr.ValidateAndPrepare(blkAndPvtdata4, true)
+	require.NoError(t, err)
+	require.NoError(t, txMgr.Commit())
+	// check the metadata are captured
+	metadata = ledger.WritesetMetadata{}
+	metadata.Add(ns, coll, "key1", sbe2)
+	require.Equal(t, metadata, simRes4.WritesetMetadata)
 }

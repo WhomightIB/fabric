@@ -11,8 +11,9 @@ import (
 	"fmt"
 	"time"
 
-	ab "github.com/hyperledger/fabric-protos-go/orderer"
-	"github.com/hyperledger/fabric-protos-go/peer"
+	ab "github.com/hyperledger/fabric-protos-go-apiv2/orderer"
+	"github.com/hyperledger/fabric-protos-go-apiv2/peer"
+	"github.com/hyperledger/fabric/common/deliverclient/orderers"
 	"github.com/hyperledger/fabric/gossip/common"
 	"github.com/hyperledger/fabric/internal/pkg/comm"
 	"google.golang.org/grpc"
@@ -34,25 +35,27 @@ type orderer struct {
 type endpointConfig struct {
 	pkiid        common.PKIidType
 	address      string
+	logAddress   string
 	mspid        string
 	tlsRootCerts [][]byte
 }
 
 type (
-	endorserConnector func(*grpc.ClientConn) peer.EndorserClient
-	ordererConnector  func(*grpc.ClientConn) ab.AtomicBroadcastClient
+	endorserConnector func(conn grpc.ClientConnInterface) peer.EndorserClient
+	ordererConnector  func(conn grpc.ClientConnInterface) ab.AtomicBroadcastClient
 )
 
 //go:generate counterfeiter -o mocks/dialer.go --fake-name Dialer . dialer
 type dialer func(ctx context.Context, target string, opts ...grpc.DialOption) (*grpc.ClientConn, error)
 
 type endpointFactory struct {
-	timeout         time.Duration
-	connectEndorser endorserConnector
-	connectOrderer  ordererConnector
-	dialer          dialer
-	clientCert      []byte
-	clientKey       []byte
+	timeout                  time.Duration
+	connectEndorser          endorserConnector
+	connectOrderer           ordererConnector
+	dialer                   dialer
+	clientCert               []byte
+	clientKey                []byte
+	ordererEndpointOverrides map[string]*orderers.Endpoint
 }
 
 func (ef *endpointFactory) newEndorser(pkiid common.PKIidType, address, mspid string, tlsRootCerts [][]byte) (*endorser, error) {
@@ -74,12 +77,21 @@ func (ef *endpointFactory) newEndorser(pkiid common.PKIidType, address, mspid st
 	return &endorser{
 		client:          connectEndorser(conn),
 		closeConnection: close,
-		endpointConfig:  &endpointConfig{pkiid: pkiid, address: address, mspid: mspid, tlsRootCerts: tlsRootCerts},
+		endpointConfig:  &endpointConfig{pkiid: pkiid, address: address, logAddress: address, mspid: mspid, tlsRootCerts: tlsRootCerts},
 	}, nil
 }
 
 func (ef *endpointFactory) newOrderer(address, mspid string, tlsRootCerts [][]byte) (*orderer, error) {
-	conn, err := ef.newConnection(address, tlsRootCerts)
+	connAddress := address
+	logAddess := address
+	connCerts := tlsRootCerts
+	if override, ok := ef.ordererEndpointOverrides[address]; ok {
+		connAddress = override.Address
+		connCerts = override.RootCerts
+		logAddess = fmt.Sprintf("%s (mapped from %s)", connAddress, address)
+		logger.Debugw("Overriding orderer endpoint address", "from", address, "to", connAddress)
+	}
+	conn, err := ef.newConnection(connAddress, connCerts)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +102,7 @@ func (ef *endpointFactory) newOrderer(address, mspid string, tlsRootCerts [][]by
 	return &orderer{
 		client:          connectOrderer(conn),
 		closeConnection: conn.Close,
-		endpointConfig:  &endpointConfig{address: address, mspid: mspid, tlsRootCerts: tlsRootCerts},
+		endpointConfig:  &endpointConfig{address: address, logAddress: logAddess, mspid: mspid, tlsRootCerts: tlsRootCerts},
 	}, nil
 }
 
@@ -103,7 +115,8 @@ func (ef *endpointFactory) newConnection(address string, tlsRootCerts [][]byte) 
 			Certificate:       ef.clientCert,
 			Key:               ef.clientKey,
 		},
-		DialTimeout: ef.timeout,
+		DialTimeout:  ef.timeout,
+		AsyncConnect: true,
 	}
 	dialOpts, err := config.DialOptions()
 	if err != nil {

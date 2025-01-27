@@ -7,27 +7,23 @@ SPDX-License-Identifier: Apache-2.0
 package configtx
 
 import (
-	"io/ioutil"
+	"os"
 
-	"github.com/golang/protobuf/proto"
-	"github.com/hyperledger/fabric-protos-go/common"
+	"github.com/hyperledger/fabric-protos-go-apiv2/common"
 	"github.com/hyperledger/fabric/integration/nwo"
-	"github.com/hyperledger/fabric/internal/configtxgen/encoder"
-	"github.com/hyperledger/fabric/internal/configtxgen/genesisconfig"
 	"github.com/hyperledger/fabric/protoutil"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ = Describe("ConfigTx ConsenterMapping", func() {
-	It("generates genesis block and checks it contains the ConsenterMapping", func() {
-		var err error
-		testDir, err := ioutil.TempDir("", "configtx")
+	It("generates an application channel genesis block and checks it contains the ConsenterMapping", func() {
+		testDir, err := os.MkdirTemp("", "configtx")
 		Expect(err).NotTo(HaveOccurred())
+		defer os.RemoveAll(testDir)
 
 		network := nwo.New(nwo.MultiNodeBFT(), testDir, nil, StartPort(), components)
-
-		channelName := network.Channels[0].Name
 
 		// Generate config
 		network.GenerateConfigTree()
@@ -36,15 +32,16 @@ var _ = Describe("ConfigTx ConsenterMapping", func() {
 		network.Bootstrap()
 
 		// check the config transaction in the genesis block contains the ConsenterMapping
-		sysProfile := genesisconfig.Load("SampleDevModeBFT", network.RootDir)
-		Expect(sysProfile.Orderer).NotTo(BeNil())
-		pgen := encoder.New(sysProfile)
-		genesisBlock := pgen.GenesisBlockForChannel(channelName)
-		Expect(genesisBlock.GetData().GetData()).NotTo(BeNil())
-		env, err := protoutil.UnmarshalEnvelope(genesisBlock.Data.Data[0])
+		// get the genesis block
+		configBlock := nwo.UnmarshalBlockFromFile(network.OutputBlockPath("testchannel"))
+		envelope, err := protoutil.GetEnvelopeFromBlock(configBlock.Data.Data[0])
 		Expect(err).NotTo(HaveOccurred())
-		payload, err := protoutil.UnmarshalPayload(env.Payload)
+
+		// unmarshal the payload bytes
+		payload, err := protoutil.UnmarshalPayload(envelope.Payload)
 		Expect(err).NotTo(HaveOccurred())
+
+		// unmarshal the config envelope bytes
 		configEnv, err := protoutil.UnmarshalConfigEnvelope(payload.GetData())
 		Expect(err).NotTo(HaveOccurred())
 		group := configEnv.GetConfig().GetChannelGroup().GetGroups()["Orderer"]
